@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -51,19 +53,56 @@ func NewServer(ip string, port int) *Server {
 }
 
 func (server *Server) Handler(conn net.Conn) {
+
+	user := NewUser(conn, server)
+	user.Online()
 	// 处理连接
-	fmt.Println("连接成功")
+	fmt.Println(user.Name + "连接成功")
 
-	user := NewUser(conn)
+	// 监听用户是否活跃的channel
+	isLive := make(chan bool)
 
-	server.mapLock.Lock()
-	// 用户上线，将用户添加到OnlineMap表中
-	server.OnlineMap[user.Name] = user
-	server.mapLock.Unlock()
-	// 广播当前用户上线消息
-	server.BroadCast(user, "已上线")
-	// 当前handler阻塞
-	select {}
+	// 接收客户端发送的消息  客户端消息需要自定义协议来进行分类解析
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if n == 0 {
+				user.Offline()
+				return
+			}
+			if err != nil && err != io.EOF {
+				fmt.Println("conn read err:", err)
+				return
+			}
+
+			// msg := TrimNewLineWithoutSpace(string(buf[:n]))
+			msg := string(buf[:n-1])
+			// 将消息进行广播
+			user.DoMessage(msg)
+
+			// 用户的任意消息，代表当前用户是一个活跃的
+			isLive <- true
+		}
+
+	}()
+
+	for {
+		// 当前handler阻塞 todo 超时机制
+		select {
+		case <-isLive:
+			// 当前用户是活跃的，有消息上行，重置定时器，什么都不做，更新下面的定时器
+
+		case <-time.After(time.Second * 300):
+			println(user.Name + "超时被踢!")
+			user.SendMsg("超时未发送消息，你被踢了")
+			// 销毁用户资源
+			close(user.C)
+			// 关闭连接
+			conn.Close()
+			return
+		}
+	}
 }
 
 func (server *Server) Start() {
